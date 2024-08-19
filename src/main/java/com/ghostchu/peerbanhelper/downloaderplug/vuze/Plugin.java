@@ -1,5 +1,5 @@
 package com.ghostchu.peerbanhelper.downloaderplug.vuze;
-import com.aelitis.azureus.core.networkmanager.Transport;
+
 import com.ghostchu.peerbanhelper.downloaderplug.vuze.network.bean.clientbound.BanBean;
 import com.ghostchu.peerbanhelper.downloaderplug.vuze.network.bean.clientbound.BanListReplacementBean;
 import com.ghostchu.peerbanhelper.downloaderplug.vuze.network.bean.clientbound.UnBanBean;
@@ -44,7 +44,7 @@ public class Plugin implements UnloadablePlugin {
         if (torrent == null) return null;
         return new TorrentRecord(
                 torrent.getName(),
-                torrent.getHash() == null ? null : java.util.Base64.getEncoder().encodeToString(torrent.getHash()),
+                torrent.getHash() == null ? null : bytesToHex(torrent.getHash()),
                 torrent.getSize(),
                 torrent.getCreationDate(),
                 torrent.getCreatedBy(),
@@ -93,7 +93,7 @@ public class Plugin implements UnloadablePlugin {
     }
 
     private void initEndpoints(Javalin javalin) {
-        javalin .get("/metadata", this::handleMetadata)
+        javalin.get("/metadata", this::handleMetadata)
                 .get("/downloads", this::handleDownloads)
                 .get("/download/{infoHash}", this::handleDownload)
                 .get("/download/{infoHash}/peers", this::handlePeers)
@@ -136,7 +136,7 @@ public class Plugin implements UnloadablePlugin {
         List<Integer> filter = ctx.queryParams("filter").stream().map(Integer::parseInt).collect(Collectors.toList());
         for (Download download : pluginInterface.getDownloadManager().getDownloads()) {
             boolean shouldAddToResultSet = filter.isEmpty() || filter.contains(download.getState());
-            if(shouldAddToResultSet){
+            if (shouldAddToResultSet) {
                 records.add(getDownloadRecord(download));
             }
         }
@@ -178,7 +178,7 @@ public class Plugin implements UnloadablePlugin {
 
     public void handleDownload(Context ctx) {
         String arg = ctx.pathParam("infoHash");
-        byte[] infoHash = java.util.Base64.getDecoder().decode(arg);
+        byte[] infoHash = hexToByteArray(arg);
         try {
             Download download = pluginInterface.getDownloadManager().getDownload(infoHash);
             if (download == null) {
@@ -194,7 +194,7 @@ public class Plugin implements UnloadablePlugin {
 
     public void handlePeers(Context ctx) {
         String arg = ctx.pathParam("infoHash");
-        byte[] infoHash = java.util.Base64.getDecoder().decode(arg);
+        byte[] infoHash = hexToByteArray(arg);
         try {
             Download download = pluginInterface.getDownloadManager().getDownload(infoHash);
             if (download == null) {
@@ -295,7 +295,7 @@ public class Plugin implements UnloadablePlugin {
                 download.isComplete(),
                 download.isChecking(),
                 download.isMoving(),
-                download.getDownloadPeerId() == null ? null : java.util.Base64.getEncoder().encodeToString(download.getDownloadPeerId()).toLowerCase(Locale.ROOT),
+                download.getDownloadPeerId() == null ? null : bytesToHex(download.getDownloadPeerId()).toLowerCase(Locale.ROOT),
                 download.isRemoved());
     }
 
@@ -340,13 +340,13 @@ public class Plugin implements UnloadablePlugin {
     private PeerRecord getPeerRecord(Peer peer) {
         if (peer == null) return null;
         String client = peer.getClient();
-        if(peer instanceof PeerImpl){
+        if (peer instanceof PeerImpl) {
             client = ((PeerImpl) peer).getDelegate().getClientNameFromExtensionHandshake();
         }
         return new PeerRecord(
                 false,
                 peer.getState(),
-                peer.getId() == null ? null : Base64.getEncoder().encodeToString(peer.getId()),
+                peer.getId() == null ? null : bytesToHex(peer.getId()),
                 peer.getIp(),
                 peer.getTCPListenPort(),
                 peer.getUDPListenPort(),
@@ -389,4 +389,50 @@ public class Plugin implements UnloadablePlugin {
         );
     }
 
+
+    public static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte aByte : bytes) {
+            String hex = Integer.toHexString(aByte & 0xFF);
+            if (hex.length() < 2) {
+                sb.append(0);
+            }
+            sb.append(hex);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * hex字符串转byte数组
+     * @param inHex 待转换的Hex字符串
+     * @return 转换后的byte数组结果
+     */
+    public static byte[] hexToByteArray(String inHex) {
+        int hexlen = inHex.length();
+        byte[] result;
+        if (hexlen % 2 == 1) {
+            //奇数
+            hexlen++;
+            result = new byte[(hexlen / 2)];
+            inHex = "0" + inHex;
+        } else {
+            //偶数
+            result = new byte[(hexlen / 2)];
+        }
+        int j = 0;
+        for (int i = 0; i < hexlen; i += 2) {
+            result[j] = hexToByte(inHex.substring(i, i + 2));
+            j++;
+        }
+        return result;
+    }
+
+    /**
+     * Hex字符串转byte
+     * @param inHex 待转换的Hex字符串
+     * @return 转换后的byte
+     */
+    public static byte hexToByte(String inHex) {
+        return (byte) Integer.parseInt(inHex, 16);
+    }
 }
