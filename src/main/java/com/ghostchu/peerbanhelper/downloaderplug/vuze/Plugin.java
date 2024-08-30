@@ -1,5 +1,6 @@
 package com.ghostchu.peerbanhelper.downloaderplug.vuze;
 
+import com.aelitis.azureus.core.networkmanager.Transport;
 import com.ghostchu.peerbanhelper.downloaderplug.vuze.network.bean.clientbound.BanBean;
 import com.ghostchu.peerbanhelper.downloaderplug.vuze.network.bean.clientbound.BanListReplacementBean;
 import com.ghostchu.peerbanhelper.downloaderplug.vuze.network.bean.clientbound.UnBanBean;
@@ -10,6 +11,7 @@ import com.google.gson.Gson;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import io.javalin.http.HttpStatus;
+import org.gudy.azureus2.core3.config.COConfigurationManager;
 import org.gudy.azureus2.plugins.PluginException;
 import org.gudy.azureus2.plugins.PluginInterface;
 import org.gudy.azureus2.plugins.UnloadablePlugin;
@@ -18,8 +20,8 @@ import org.gudy.azureus2.plugins.download.DownloadException;
 import org.gudy.azureus2.plugins.download.DownloadStats;
 import org.gudy.azureus2.plugins.ipfilter.IPBanned;
 import org.gudy.azureus2.plugins.ipfilter.IPFilter;
+import org.gudy.azureus2.plugins.ipfilter.IPFilterException;
 import org.gudy.azureus2.plugins.peers.*;
-import org.gudy.azureus2.plugins.tag.Tag;
 import org.gudy.azureus2.plugins.torrent.Torrent;
 import org.gudy.azureus2.plugins.ui.config.IntParameter;
 import org.gudy.azureus2.plugins.ui.config.StringParameter;
@@ -27,11 +29,15 @@ import org.gudy.azureus2.plugins.ui.model.BasicPluginConfigModel;
 import org.gudy.azureus2.pluginsimpl.local.peers.PeerImpl;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class Plugin implements UnloadablePlugin {
     public static final Gson GSON = new Gson();
     private static final String PBH_IDENTIFIER = "<PeerBanHelper>";
+    private static final Lock BAN_LIST_OPERATION_LOCK = new ReentrantLock();
     private PluginInterface pluginInterface;
     private IntParameter listenPortParam;
     private StringParameter accessKeyParam;
@@ -54,6 +60,70 @@ public class Plugin implements UnloadablePlugin {
                 torrent.isPrivate(),
                 torrent.isComplete()
         );
+    }
+
+    public static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte aByte : bytes) {
+            String hex = Integer.toHexString(aByte & 0xFF);
+            if (hex.length() < 2) {
+                sb.append(0);
+            }
+            sb.append(hex);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * hex字符串转byte数组
+     * @param inHex 待转换的Hex字符串
+     * @return 转换后的byte数组结果
+     */
+    public static byte[] hexToByteArray(String inHex) {
+        int hexlen = inHex.length();
+        byte[] result;
+        if (hexlen % 2 == 1) {
+            //奇数
+            hexlen++;
+            result = new byte[(hexlen / 2)];
+            inHex = "0" + inHex;
+        } else {
+            //偶数
+            result = new byte[(hexlen / 2)];
+        }
+        int j = 0;
+        for (int i = 0; i < hexlen; i += 2) {
+            result[j] = hexToByte(inHex.substring(i, i + 2));
+            j++;
+        }
+        return result;
+    }
+
+    /**
+     * Hex字符串转byte
+     * @param inHex 待转换的Hex字符串
+     * @return 转换后的byte
+     */
+    public static byte hexToByte(String inHex) {
+        return (byte) Integer.parseInt(inHex, 16);
+    }
+
+    public void runIPFilterOperation(Runnable runnable) throws IPFilterException {
+        BAN_LIST_OPERATION_LOCK.lock();
+        try {
+            var originalPersistentSetting = COConfigurationManager.getBooleanParameter("Ip Filter Banning Persistent" );
+            try {
+                COConfigurationManager.setParameter("Ip Filter Banning Persistent", false);
+                runnable.run();
+            }finally {
+                COConfigurationManager.setParameter("Ip Filter Banning Persistent", originalPersistentSetting);
+                if(originalPersistentSetting){
+                    this.pluginInterface.getIPFilter().save();
+                }
+            }
+        } finally {
+            BAN_LIST_OPERATION_LOCK.unlock();
+        }
     }
 
     @Override
@@ -94,6 +164,7 @@ public class Plugin implements UnloadablePlugin {
 
     private void initEndpoints(Javalin javalin) {
         javalin.get("/metadata", this::handleMetadata)
+                .get("/statistics", this::handleStatistics)
                 .get("/downloads", this::handleDownloads)
                 .get("/download/{infoHash}", this::handleDownload)
                 .get("/download/{infoHash}/peers", this::handlePeers)
@@ -101,6 +172,29 @@ public class Plugin implements UnloadablePlugin {
                 .post("/bans", this::handleBanListApplied)
                 .put("/bans", this::handleBanListReplacement)
                 .delete("/bans", this::handleBatchUnban);
+    }
+
+    private void handleStatistics(Context context) {
+        var stats = pluginInterface.getDownloadManager().getStats();
+        context.json(
+                new StatisticsRecord(
+                        stats.getOverallDataBytesReceived(),
+                        stats.getOverallDataBytesSent(),
+                        stats.getSessionUptimeSeconds(),
+                        stats.getDataReceiveRate(),
+                        stats.getProtocolReceiveRate(),
+                        stats.getDataAndProtocolReceiveRate(),
+                        stats.getDataSendRate(),
+                        stats.getProtocolSendRate(),
+                        stats.getDataAndProtocolSendRate(),
+                        stats.getDataBytesReceived(),
+                        stats.getProtocolBytesReceived(),
+                        stats.getDataBytesSent(),
+                        stats.getProtocolBytesSent(),
+                        stats.getSmoothedReceiveRate(),
+                        stats.getSmoothedSendRate()
+                )
+        );
     }
 
     private void handleMetadata(Context context) {
@@ -112,23 +206,25 @@ public class Plugin implements UnloadablePlugin {
         context.json(callbackBean);
     }
 
-    private void handleBanListApplied(Context context) {
+    private void handleBanListApplied(Context context) throws IPFilterException {
         BanBean banBean = context.bodyAsClass(BanBean.class);
         IPFilter ipFilter = pluginInterface.getIPFilter();
-        int success = 0;
-        int failed = 0;
-        for (String s : banBean.getIps()) {
-            try {
-                ipFilter.ban(s, PBH_IDENTIFIER);
-                success++;
-            } catch (Exception e) {
-                e.printStackTrace();
-                failed++;
+        AtomicInteger success = new AtomicInteger();
+        AtomicInteger failed = new AtomicInteger();
+        runIPFilterOperation(()->{
+            for (String s : banBean.getIps()) {
+                try {
+                    ipFilter.ban(s, PBH_IDENTIFIER);
+                    success.incrementAndGet();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    failed.incrementAndGet();
+                }
             }
-        }
+        });
         cleanupPeers(banBean.getIps());
         context.status(HttpStatus.OK);
-        context.json(new BatchOperationCallbackBean(success, failed));
+        context.json(new BatchOperationCallbackBean(success.get(), failed.get()));
     }
 
     private void handleDownloads(Context ctx) {
@@ -159,21 +255,23 @@ public class Plugin implements UnloadablePlugin {
         ctx.json(banned);
     }
 
-    private void handleBatchUnban(Context ctx) {
+    private void handleBatchUnban(Context ctx) throws IPFilterException {
         UnBanBean banBean = ctx.bodyAsClass(UnBanBean.class);
-        int unbanned = 0;
-        int failed = 0;
-        for (String ip : banBean.getIps()) {
-            try {
-                pluginInterface.getIPFilter().unban(ip);
-                unbanned++;
-            } catch (Exception e) {
-                e.printStackTrace();
-                failed++;
+        AtomicInteger unbanned = new AtomicInteger();
+        AtomicInteger failed = new AtomicInteger();
+        runIPFilterOperation(()->{
+            for (String ip : banBean.getIps()) {
+                try {
+                    pluginInterface.getIPFilter().unban(ip);
+                    unbanned.incrementAndGet();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    failed.incrementAndGet();
+                }
             }
-        }
+        });
         ctx.status(HttpStatus.OK);
-        ctx.json(new BatchOperationCallbackBean(unbanned, failed));
+        ctx.json(new BatchOperationCallbackBean(unbanned.get(), failed.get()));
     }
 
     public void handleDownload(Context ctx) {
@@ -207,28 +305,30 @@ public class Plugin implements UnloadablePlugin {
         }
     }
 
-    public void handleBanListReplacement(Context ctx) {
+    public void handleBanListReplacement(Context ctx) throws IPFilterException {
         BanListReplacementBean replacementBean = ctx.bodyAsClass(BanListReplacementBean.class);
-        IPFilter ipFilter = pluginInterface.getIPFilter();
-        for (IPBanned blockedIP : ipFilter.getBannedIPs()) {
-            if (PBH_IDENTIFIER.equals(blockedIP.getBannedTorrentName()) || replacementBean.isIncludeNonPBHEntries()) {
-                ipFilter.unban(blockedIP.getBannedIP());
+        AtomicInteger success = new AtomicInteger();
+        AtomicInteger failed = new AtomicInteger();
+        runIPFilterOperation(()->{
+            IPFilter ipFilter = pluginInterface.getIPFilter();
+            for (IPBanned blockedIP : ipFilter.getBannedIPs()) {
+                if (PBH_IDENTIFIER.equals(blockedIP.getBannedTorrentName()) || replacementBean.isIncludeNonPBHEntries()) {
+                    ipFilter.unban(blockedIP.getBannedIP());
+                }
             }
-        }
-        int success = 0;
-        int failed = 0;
-        for (String s : replacementBean.getReplaceWith()) {
-            try {
-                ipFilter.ban(s, PBH_IDENTIFIER);
-                success++;
-            } catch (Exception e) {
-                e.printStackTrace();
-                failed++;
+            for (String s : replacementBean.getReplaceWith()) {
+                try {
+                    ipFilter.ban(s, PBH_IDENTIFIER);
+                    success.incrementAndGet();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    failed.incrementAndGet();
+                }
             }
-        }
+        });
         cleanupPeers(replacementBean.getReplaceWith());
         ctx.status(HttpStatus.OK);
-        ctx.json(new BatchOperationCallbackBean(success, failed));
+        ctx.json(new BatchOperationCallbackBean(success.get(), failed.get()));
     }
 
     private void cleanupPeers(List<String> peers) {
@@ -387,52 +487,5 @@ public class Plugin implements UnloadablePlugin {
                 stats.getPermittedBytesToSend(),
                 stats.getOverallBytesRemaining()
         );
-    }
-
-
-    public static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte aByte : bytes) {
-            String hex = Integer.toHexString(aByte & 0xFF);
-            if (hex.length() < 2) {
-                sb.append(0);
-            }
-            sb.append(hex);
-        }
-        return sb.toString();
-    }
-
-    /**
-     * hex字符串转byte数组
-     * @param inHex 待转换的Hex字符串
-     * @return 转换后的byte数组结果
-     */
-    public static byte[] hexToByteArray(String inHex) {
-        int hexlen = inHex.length();
-        byte[] result;
-        if (hexlen % 2 == 1) {
-            //奇数
-            hexlen++;
-            result = new byte[(hexlen / 2)];
-            inHex = "0" + inHex;
-        } else {
-            //偶数
-            result = new byte[(hexlen / 2)];
-        }
-        int j = 0;
-        for (int i = 0; i < hexlen; i += 2) {
-            result[j] = hexToByte(inHex.substring(i, i + 2));
-            j++;
-        }
-        return result;
-    }
-
-    /**
-     * Hex字符串转byte
-     * @param inHex 待转换的Hex字符串
-     * @return 转换后的byte
-     */
-    public static byte hexToByte(String inHex) {
-        return (byte) Integer.parseInt(inHex, 16);
     }
 }
