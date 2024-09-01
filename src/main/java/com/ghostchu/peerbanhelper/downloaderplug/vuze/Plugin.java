@@ -22,6 +22,7 @@ import org.gudy.azureus2.plugins.ipfilter.IPBanned;
 import org.gudy.azureus2.plugins.ipfilter.IPFilter;
 import org.gudy.azureus2.plugins.ipfilter.IPFilterException;
 import org.gudy.azureus2.plugins.peers.*;
+import org.gudy.azureus2.plugins.tag.Tag;
 import org.gudy.azureus2.plugins.torrent.Torrent;
 import org.gudy.azureus2.plugins.ui.config.IntParameter;
 import org.gudy.azureus2.plugins.ui.config.StringParameter;
